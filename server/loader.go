@@ -7,6 +7,8 @@ import (
 	"github.com/goccy/bigquery-emulator/types"
 )
 
+const tempDataset = "__temp_tables"
+
 func (s *Server) addProjects(ctx context.Context, projects []*types.Project) error {
 	for _, project := range projects {
 		if err := s.addProject(ctx, project); err != nil {
@@ -26,6 +28,7 @@ func (s *Server) addProject(ctx context.Context, project *types.Project) error {
 		return err
 	}
 	defer tx.RollbackIfNotCommitted()
+	project.Datasets = append(project.Datasets, types.NewDataset(tempDataset))
 	for _, dataset := range project.Datasets {
 		for _, table := range dataset.Tables {
 			table.SetupMetadata(project.ID, dataset.ID)

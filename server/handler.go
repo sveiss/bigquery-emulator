@@ -1005,7 +1005,14 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 		return nil, fmt.Errorf("failed to start transaction: %w", err)
 	}
 	defer tx.RollbackIfNotCommitted()
-	hasDestinationTable := job.Configuration.Query.DestinationTable != nil
+	createTempTable := (job.Configuration.Query.DestinationTable == nil)
+	if createTempTable {
+		job.Configuration.Query.DestinationTable = &bigqueryv2.TableReference{
+			ProjectId: r.project.ID,
+			DatasetId: tempDataset,
+			TableId:   fmt.Sprintf("anonymous_%s", randomID()),
+		}
+	}
 	startTime := time.Now()
 	response, jobErr := r.server.contentRepo.Query(
 		ctx,
@@ -1016,18 +1023,45 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 		job.Configuration.Query.QueryParameters,
 	)
 	endTime := time.Now()
-	if hasDestinationTable && jobErr == nil {
-		// insert results to destination table
+	if jobErr == nil {
 		tableRef := job.Configuration.Query.DestinationTable
 		tableDef := h.tableDefFromQueryResponse(tableRef.TableId, response)
+
+		if createTempTable {
+			bqtb := bigqueryv2.Table{
+				Schema:         response.Schema,
+				TableReference: tableRef,
+			}
+
+			tempTable := types.NewTable(
+				tableRef.TableId,
+				tableDef.Columns,
+				nil)
+
+			tempTable.SetupMetadata(r.project.ID, tempDataset)
+
+			tx.SetProjectAndDataset(r.project.ID, tempDataset)
+			if err := r.server.contentRepo.CreateTable(ctx, tx, &bqtb); err != nil {
+				return nil, fmt.Errorf("failed to create SQL table: %w", err)
+			}
+			ds := r.project.Dataset(tempDataset)
+			if err := ds.AddTable(
+				ctx,
+				tx.Tx(),
+				metadata.NewTable(
+					r.server.metaRepo,
+					r.project.ID,
+					tempDataset,
+					tableRef.TableId,
+					tempTable.Metadata,
+				),
+			); err != nil {
+				return nil, fmt.Errorf("failed to insert table metadata record: %w", err)
+			}
+		}
+		// insert results to destination table
 		if err := r.server.contentRepo.AddTableData(ctx, tx, tableRef.ProjectId, tableRef.DatasetId, tableDef); err != nil {
 			return nil, fmt.Errorf("failed to add table data: %w", err)
-		}
-	} else {
-		job.Configuration.Query.DestinationTable = &bigqueryv2.TableReference{
-			ProjectId: r.project.ID,
-			DatasetId: "anonymous",
-			TableId:   "anonymous",
 		}
 	}
 	if job.JobReference.JobId == "" {
